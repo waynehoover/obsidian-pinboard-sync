@@ -20,7 +20,6 @@ import { PinRenderer } from "./renderer";
 
 import { groupBy, isMacOS, updateSection } from "./textUtils";
 
-
 declare global {
   interface Window {
     moment: typeof moment;
@@ -28,20 +27,17 @@ declare global {
 }
 
 export default class PinboardSyncPlugin extends Plugin {
-
   public settings: ISettings;
   private syncTimeoutId: number;
   private settingsTab: DailyPinboardSettingsTab;
 
   async onload(): Promize<void> {
-
     console.log("[Pinboard] loading plugin");
 
     this.scheduleNextSync = this.scheduleNextSync.bind(this);
     this.syncPinboard = this.syncPinboard.bind(this);
     this.tryToScheduleSync = this.tryToScheduleSync.bind(this);
     this.tryToSyncPinboard = this.tryToSyncPinboard.bind(this);
-
 
     this.addCommand({
       id: "pinboard-sync-cmd",
@@ -77,8 +73,7 @@ export default class PinboardSyncPlugin extends Plugin {
           await this.writeSettings({ hasAcceptedDisclaimer: true });
           this.syncPinboard();
         },
-        text:
-          "Enabling sync will backfill your recent Pinboard into Obsidian. This means potentially creating or modifying hundreds of notes. Make sure to test the plugin in a test vault before continuing.",
+        text: "Enabling sync will backfill your recent Pinboard into Obsidian. This means potentially creating or modifying hundreds of notes. Make sure to test the plugin in a test vault before continuing.",
         title: "Sync Now?",
       }).open();
     }
@@ -99,66 +94,92 @@ export default class PinboardSyncPlugin extends Plugin {
           // update the settings tab display
           this.settingsTab.display();
         },
-        text:
-          "Enabling sync will backfill your recent Pinboard into Obsidian. This means potentially creating or modifying hundreds of notes. Make sure to test the plugin in a test vault before continuing.",
+        text: "Enabling sync will backfill your recent Pinboard into Obsidian. This means potentially creating or modifying hundreds of notes. Make sure to test the plugin in a test vault before continuing.",
         title: "Sync Now?",
       }).open();
     }
   }
 
-  async getPostsFromPinboard (
+  async getPostsFromPinboard(
     latestSyncTime: number,
     options: ISettings
-    ):Promise<PinboardPostCollection> {
+  ): Promise<PinboardPostCollection> {
+    let pinboard = new Pinboard(options.apiToken);
+    let handleApiFailure = (error: any) => {
+      console.log(`API error: ${error}`);
+    };
 
-      let pinboard = new Pinboard(options.apiToken);
-      let handleApiFailure = (error: any) => {
-        console.log(`API error: ${error}`);
-      };
-
-      return pinboard.posts.recent([], options.recentCount);
-    }
-
+    return pinboard.posts.recent([], options.recentCount);
+  }
 
   async syncPinboard(): Promise<void> {
     const pinRenderer = new PinRenderer(this.app, this.settings);
-    const dailyNotes = getAllDailyNotes();
     const latestSyncTime = this.settings.latestSyncTime || 0;
 
     let pinCollection = [];
     try {
-      pinCollection = await this.getPostsFromPinboard(latestSyncTime, this.settings);
+      pinCollection = await this.getPostsFromPinboard(
+        latestSyncTime,
+        this.settings
+      );
     } catch (err) {
       new Notice("[Pinboard Sync] failed");
       console.log(err);
       return;
     }
 
-    const daysToPins: Record<string, PinboardPost> = groupBy(
+    const daysToPins: Record<string, PinboardPost[]> = groupBy(
       pinCollection.posts.filter((pin) => pin.time),
       (pin) => window.moment(pin.time).startOf("day").format()
     );
 
-    for (const [dateStr, pins] of Object.entries(daysToPins)) {
-      const date = window.moment(dateStr);
-
-      let dailyNote = getDailyNote(date, dailyNotes);
-
-      if (!dailyNote) {
-        dailyNote = await createDailyNote(date);
-      }
-
-      await updateSection(
-        this.app,
-        dailyNote,
-        this.settings.sectionHeading,
-        pinRenderer.render(pins)
-      );
-    }
+    await this.writePinsToSingleFile(daysToPins, pinRenderer);
 
     new Notice("[Pinboard Sync] complete");
     this.writeSettings({ latestSyncTime: window.moment().unix() });
     this.scheduleNextSync();
+  }
+
+  async writePinsToSingleFile(
+    daysToPins: Record<string, PinboardPost[]>,
+    pinRenderer: PinRenderer
+  ): Promise<void> {
+    const fileName = this.settings.singleFileNoteName || "Pinboard Pins";
+    const filePath = `${fileName}.md`;
+    let file = this.app.vault.getAbstractFileByPath(filePath);
+
+    let existingContent = "";
+    if (file) {
+      existingContent = await this.app.vault.read(file);
+    } else {
+      file = await this.app.vault.create(filePath, "");
+    }
+
+    let newContent = "";
+    for (const [dateStr, pins] of Object.entries(daysToPins)) {
+      const date = window.moment(dateStr);
+      const formattedDate = date.format("YYYY-MM-DD");
+
+      const dateContent = `${formattedDate}\n${pinRenderer
+        .render(pins)
+        .trim()}\n\n`;
+
+      if (existingContent.includes(formattedDate)) {
+        // Update existing date section
+        const regex = new RegExp(
+          `${formattedDate}[\\s\\S]*?(?=\\d{4}-\\d{2}-\\d{2}|$)`
+        );
+        existingContent = existingContent.replace(regex, dateContent);
+      } else {
+        // Add new date section
+        newContent += dateContent;
+      }
+    }
+
+    // Combine existing content with new content
+    const finalContent = newContent + existingContent;
+
+    await this.app.vault.modify(file, finalContent.trim());
   }
 
   cancelScheduledSync(): void {
@@ -192,7 +213,6 @@ export default class PinboardSyncPlugin extends Plugin {
     }
   }
 
-
   async writeSettings(diff: Partial<ISettings>): Promise<void> {
     this.settings = Object.assign(this.settings, diff);
 
@@ -210,5 +230,4 @@ export default class PinboardSyncPlugin extends Plugin {
 
     await this.saveData(this.settings);
   }
-
 }
